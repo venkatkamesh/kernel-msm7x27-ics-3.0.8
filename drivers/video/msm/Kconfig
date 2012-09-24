@@ -568,6 +568,14 @@ config FB_MSM_HDMI_AS_PRIMARY
 	---help---
 	Support for using HDMI as primary
 
+# LGE_CHANGE_S [minjong.gong] 2010-03-24, Google Mass CDMA Hitachi MDDI I/F LCD
+config FB_MSM_MDDI_HITACHI_HVGA
+	bool "MDDI HITACHI HVGA Panel"
+	select FB_MSM_MDDI
+	---help---
+	  Support for MDDI HITACHI HVGA(320x480) Panel.
+# LGE_CHANGE_E [minjong.gong] 2010-03-24, Google Mass CDMA Hitachi MDDI I/F LCD
+
 config FB_MSM_PANEL_NONE
 	bool "NONE"
 	---help---

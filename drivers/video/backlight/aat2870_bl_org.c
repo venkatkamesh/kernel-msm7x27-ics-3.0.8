@@ -24,14 +24,12 @@
 #include <linux/fb.h>
 #include <linux/delay.h>
 #include <linux/gpio.h>
-#include <linux/mutex.h>
 #include <mach/board_lge.h>
 
 #define MODULE_NAME  "aat2870bl"
-#define CONFIG_AAT28XX_LEDS_CLASS
-//#define CONFIG_AAT28XX_BACKLIGHT_CLASS
+#define CONFIG_BACKLIGHT_LEDS_CLASS
 
-#ifdef CONFIG_AAT28XX_LEDS_CLASS
+#ifdef CONFIG_BACKLIGHT_LEDS_CLASS
 #include <linux/leds.h>
 #endif
 
@@ -49,8 +47,27 @@
 /* 18.0, 18.9, 19.8, 20.7, 21.6, 22.5, 23.4, 24.3, 25.2, 26.1, */
 /* 27.0, 27.9 */
 
+/* LGE_CHANGE
+  * AAT2862 has two parts of LEDs(Main and Sub)
+  * Added some definitions and modified I2C write command to control both Main and Sub LEDs.
+  * Added 'AAT2862BL_REG_BLS', changed members of structure 'aat28xx_reg_addrs'
+  * and modified 'aat28xx_write' to control two registers(AAT2862BL_REG_BLM and AAT2862BL_REG_BLS)
+  */
+
+/* LGE_CHANGE
+  * If MEQS bit in AAT2862BL_REG_BLM is set, we don't need to write command to AAT2862BL_REG_BLS.
+  * So modify command array for AAT2862 and related functions. 
+  * And change default brightness and maximum brightness.
+  */
+
+#ifdef CONFIG_MACH_MSM7X27_THUNDERA /* for P505 */
+#define LCD_LED_MAX 14 /* 13.55mA */
+#define LCD_LED_MIN 4  /* 3.87mA */
+#else
 #define LCD_LED_MAX 21 /* 20.32mA */
-#define LCD_LED_MIN 0  /* 0.48mA */
+/* If value is not 0, should not backlight off by bongkyu.kim */
+#define LCD_LED_MIN 4  /* 3.60mA */
+#endif
 #define DEFAULT_BRIGHTNESS 13
 #define AAT28XX_LDO_NUM 4
 
@@ -66,7 +83,7 @@
 #define AAT2870BL_REG_LDOCD 0x25  /* Register address for LDO select C/D */
 #define AAT2870BL_REG_LDOEN 0x26  /* Register address for LDO Enable */
 
-#ifdef CONFIG_AAT28XX_LEDS_CLASS
+#ifdef CONFIG_BACKLIGHT_LEDS_CLASS
 #define LEDS_BACKLIGHT_NAME "lcd-backlight"
 #endif
 
@@ -118,12 +135,8 @@ struct aat28xx_cmds {
 
 struct aat28xx_driver_data {
 	struct i2c_client *client;
-#ifdef CONFIG_AAT28XX_BACKLIGHT_CLASS
 	struct backlight_device *bd;
-#endif
-#ifdef CONFIG_AAT28XX_LEDS_CLASS
 	struct led_classdev *led;
-#endif
 	int gpio;
 	int intensity;
 	int max_intensity;
@@ -133,11 +146,8 @@ struct aat28xx_driver_data {
 	unsigned char reg_ldo_enable;
 	unsigned char reg_ldo_vout[2];
 	int version;
-	int initialized;
 	struct aat28xx_cmds cmds;
 	struct aat28xx_reg_addrs reg_addrs;
-	struct mutex power_lock;
-	int refcnt;
 #ifdef CONFIG_HAS_EARLYSUSPEND
 	struct early_suspend early_suspend;
 #endif
@@ -151,9 +161,18 @@ module_param(debug, uint, 0644);
 
 /* Set to Normal mode */
 static struct aat28xx_ctrl_tbl aat2862bl_normal_tbl[] = {
-/* LGE_UPDATE_S kideok.kim@lge.com 20101020*/
-	 { 0x03, 0xD2 },  /* MEQS(7)=high, DISABLE FADE_MAIN(6)=high(disabled), LCD_ON(5)=high(On),	Brightness=Default (0x12, 13th setp)*/
-//	 { 0x03, 0xF2 },  /* MEQS(7)=high, DISABLE FADE_MAIN(6)=high(disabled), LCD_ON(5)=high(On),	Brightness=Default (0x12, 13th setp)*/
+#ifdef CONFIG_MACH_MSM7X27_THUNDERA /* for P505 */
+	/* 2010-07-23, 
+	 * MEQS(7)=high, DISABLE FADE_MAIN(6)=high(disabled),
+	 * LCD_ON(5)=high(On),  Brightness=Default(0x09) 
+	 */
+	 { 0x03, 0xE9 },  
+#else
+	/* LGE_CHANGE. 
+	 * Change register value to do not turn on the bakclight at operatoin mode setting. (0xF2 -> 0xD2)
+	 */
+	{ 0x03, 0xD2 },  /* MEQS(7)=high, DISABLE FADE_MAIN(6)=high(disabled), LCD_ON(5)=high(On),  Brightness=Default (0x12, 13th setp)*/
+#endif
 	{ 0xFF, 0xFE }	 /* end of command */
 };
 
@@ -221,8 +240,6 @@ static struct ldo_vout_struct ldo_vout_table[] = {
 /********************************************
  * Functions
  ********************************************/
-static int aat28xx_send_intensity_no_check(struct aat28xx_driver_data *drvdata, int next);
-
 static int aat28xx_setup_version(struct aat28xx_driver_data *drvdata)
 {
 	if(!drvdata)
@@ -289,7 +306,7 @@ static int aat28xx_write(struct i2c_client *client, u8 reg, u8 val)
 	ret = i2c_smbus_write_byte_data(client, reg, val);
 	if (ret != 0) {
 		status = -EIO;
-		eprintk("fail to write(reg=0x%x,val=0x%x,ret=%d)\n", reg, val, ret);
+		eprintk("fail to write(reg=0x%x,val=0x%x)\n", reg, val);
 	}
 
 	return status;
@@ -414,51 +431,6 @@ int aat28xx_ldo_set_level(struct device *dev, unsigned num, unsigned vol)
 }
 EXPORT_SYMBOL(aat28xx_ldo_set_level);
 
-static void aat28xx_power_internal(struct aat28xx_driver_data *drvdata, int on)
-{
-#ifdef CONFIG_MACH_MSM7X27_THUNDERG
-	return;
-#endif
-	if(!drvdata || !drvdata->gpio)
-		return;
-
-	if(drvdata->refcnt == 0 && !on) {
-		printk(KERN_ERR "%s: already in power off!!\n",  __func__);
-		return;
-	}
-
-	printk(KERN_INFO "%s: on = %d, refcnt = %d\n",
-		   __func__, on, drvdata->refcnt);
-
-	mutex_lock(&drvdata->power_lock);
-	if(on) {
-		if(drvdata->refcnt == 0) {
-			gpio_set_value(drvdata->gpio, 0);
-			mdelay(20);
-			gpio_set_value(drvdata->gpio, 1);
-			mdelay(2);
-		}
-		drvdata->refcnt++;
-	} else {
-		drvdata->refcnt--;
-		if(drvdata->refcnt ==0) {
-			gpio_set_value(drvdata->gpio, 0);
-			mdelay(20);
-		}
-	}
-	mutex_unlock(&drvdata->power_lock);
-}
-
-void aat28xx_power(struct device *dev, int on)
-{
-	struct i2c_adapter *adap;
-	struct i2c_client *client;
-
-	if((adap = dev_get_drvdata(dev)) && (client=i2c_get_adapdata(adap)))
-		aat28xx_power_internal(i2c_get_clientdata(client), on);
-}
-EXPORT_SYMBOL(aat28xx_power);
-
 static int aat28xx_set_table(struct aat28xx_driver_data *drvdata, struct aat28xx_ctrl_tbl *ptbl)
 {
 	unsigned int i = 0;
@@ -490,7 +462,14 @@ static int aat28xx_set_table(struct aat28xx_driver_data *drvdata, struct aat28xx
 
 static void aat28xx_hw_reset(struct aat28xx_driver_data *drvdata)
 {
-	aat28xx_power_internal(drvdata, 1);
+	if (drvdata->client && gpio_is_valid(drvdata->gpio)) {
+		gpio_tlmm_config(GPIO_CFG(drvdata->gpio, 0, GPIO_CFG_OUTPUT, GPIO_CFG_NO_PULL, GPIO_CFG_2MA), GPIO_CFG_ENABLE);
+		/* EN set to LOW(shutdown) -> HIGH(enable) */
+		gpio_set_value(drvdata->gpio, 0);
+		udelay(5);
+		gpio_set_value(drvdata->gpio, 1);
+		udelay(5);
+	}
 }
 
 static void aat28xx_go_opmode(struct aat28xx_driver_data *drvdata)
@@ -502,8 +481,13 @@ static void aat28xx_go_opmode(struct aat28xx_driver_data *drvdata)
 			aat28xx_set_table(drvdata, drvdata->cmds.normal);
 			drvdata->state = NORMAL_STATE;
 			break;
-
 		case ALC_MODE:
+			/* LGE_CHANGE
+			 * Remove ALC mode
+			 */
+			//aat28xx_set_table(drvdata, drvdata->cmds.alc);
+			//drvdata->state = NORMAL_STATE;
+			//break;
 		default:
 			eprintk("Invalid Mode\n");
 			break;
@@ -512,8 +496,10 @@ static void aat28xx_go_opmode(struct aat28xx_driver_data *drvdata)
 
 static void aat28xx_device_init(struct aat28xx_driver_data *drvdata)
 {
-	if (drvdata->initialized && system_state == SYSTEM_BOOTING) {
-		drvdata->refcnt++;
+/* LGE_CHANGE.
+  * Do not initialize aat28xx when system booting. The aat28xx is already initialized in oemsbl or LK !!
+  */
+	if (system_state == SYSTEM_BOOTING) {
 		aat28xx_go_opmode(drvdata);
 		return;
 	}
@@ -521,6 +507,7 @@ static void aat28xx_device_init(struct aat28xx_driver_data *drvdata)
 	aat28xx_go_opmode(drvdata);
 }
 
+#ifdef CONFIG_PM
 static void aat28xx_poweron(struct aat28xx_driver_data *drvdata)
 {
 	unsigned int aat28xx_intensity;
@@ -543,13 +530,11 @@ static void aat28xx_poweron(struct aat28xx_driver_data *drvdata)
 			aat28xx_write(drvdata->client, drvdata->reg_addrs.bl_m, drvdata->intensity);
 	}
 }
+#endif /* CONFIG_PM */
 
 #if 0
 static void aat28xx_poweroff(struct aat28xx_driver_data *drvdata)
 {
-	printk("%s backlight power state = %d, gpio %d\n",
-			__func__, drvdata->state, drvdata->gpio);
-
 	if (!drvdata || drvdata->state == POWEROFF_STATE)
 		return;
 
@@ -570,12 +555,13 @@ static void aat28xx_poweroff(struct aat28xx_driver_data *drvdata)
 #endif
 
 /* This function provide sleep enter routine for power management. */
+#ifdef CONFIG_PM
 static void aat28xx_sleep(struct aat28xx_driver_data *drvdata)
 {
 	if (!drvdata || drvdata->state == SLEEP_STATE)
 		return;
 
-	printk(KERN_INFO "%s: cur state=%d to sleep state(2)\n", __func__, drvdata->state);
+	dprintk("operation mode is %s\n", (drvdata->mode == NORMAL_MODE) ? "normal_mode" : "alc_mode");
 	
 	switch (drvdata->mode) {
 		case NORMAL_MODE:
@@ -584,6 +570,14 @@ static void aat28xx_sleep(struct aat28xx_driver_data *drvdata)
 			break;
 
 		case ALC_MODE:
+			/* LGE_CHANGE
+			 * Remove ALC mode
+			 */
+			//drvdata->state = SLEEP_STATE;
+			//aat28xx_set_table(drvdata, drvdata->cmds.sleep);
+			//udelay(500);
+			//break;
+
 		default:
 			eprintk("Invalid Mode\n");
 			break;
@@ -592,60 +586,81 @@ static void aat28xx_sleep(struct aat28xx_driver_data *drvdata)
 
 static void aat28xx_wakeup(struct aat28xx_driver_data *drvdata)
 {
+	unsigned int aat28xx_intensity;
+
 	if (!drvdata || drvdata->state == NORMAL_STATE)
 		return;
 
-	printk(KERN_INFO "%s: cur state=%d to wakeup state(1)\n", __func__, drvdata->state);
-	
+	dprintk("operation mode is %s\n", (drvdata->mode == NORMAL_MODE) ? "normal_mode" : "alc_mode");
+
 	if (drvdata->state == POWEROFF_STATE) {
 		aat28xx_poweron(drvdata);
+		/* LGE_CHANGE
+		 * Because the aat28xx_go_opmode is called in the aat28xx_poweron above, so I remove below function.
+		 * If it is called two times when the previous state of AAT2862 is POWEROFF_STATE, it causes malfucction.
+		 */
+		//aat28xx_go_opmode(drvdata);
 	} else if (drvdata->state == SLEEP_STATE) {
 		if (drvdata->mode == NORMAL_MODE) {
 			if(drvdata->version == 2862) {
+				/* LGE_CHANGE
+				  * Using 'Fade in' function supported by AAT2862 when wakeup.
+				 */
 				aat28xx_write(drvdata->client, drvdata->reg_addrs.fade, 0x00);	/* Floor current : 0.48mA */
-				aat28xx_write(drvdata->client, drvdata->reg_addrs.bl_m, 0x9F);
-				aat28xx_send_intensity_no_check(drvdata, drvdata->intensity);
+				aat28xx_intensity = (~(drvdata->intensity)& 0x1F);	/* Invert BL control bits and Clear upper 3bits */
+				aat28xx_intensity |= 0xA0;							/* MEQS(7)=1, Disable Fade(6)=0, LCD_ON(5)=1*/
+				aat28xx_write(drvdata->client, drvdata->reg_addrs.bl_m, aat28xx_intensity);
+				aat28xx_write(drvdata->client, drvdata->reg_addrs.fade, 0x08);	/* Fade in to intensity brightness in 1000ms. */
 			} else {
 				aat28xx_set_table(drvdata, drvdata->cmds.normal);
-				aat28xx_send_intensity_no_check(drvdata, drvdata->intensity);
+				aat28xx_write(drvdata->client, drvdata->reg_addrs.bl_m, drvdata->intensity);
 			}
 			drvdata->state = NORMAL_STATE;
 		} else if (drvdata->mode == ALC_MODE) {
-			printk(KERN_ERR "%s: invalide mode!!!\n", __func__);
+			/* LGE_CHANGE
+			 * Remove ALC mode
+			 */
+			//aat28xx_set_table(drvdata, drvdata->cmds.alc);
+			//drvdata->state = NORMAL_STATE;
 		}
 	}
 }
-
-static int aat28xx_send_intensity_no_check(struct aat28xx_driver_data *drvdata, int next)
-{
-	int aat2862_bl_next;
-
-	if(drvdata->version == 2862) {
-		if(next != 0) {
-			aat2862_bl_next = (~next & 0x1F);	/* Invert BL control bits and Clear upper 3bits */
-			aat2862_bl_next |= 0xE0;		/* MEQS(7)=1, Disable Fade(6)=1, LCD_ON(5)=1*/
-			aat28xx_write(drvdata->client, drvdata->reg_addrs.bl_m, aat2862_bl_next);
-		} else {	// Off the backlight if brightness set level is 0.
-			aat2862_bl_next = 0xDF;		/* MEQS(7)=1, Disable Fade(6)=1, LCD_ON(5)=0*/
-			aat28xx_write(drvdata->client, drvdata->reg_addrs.bl_m, aat2862_bl_next);
-		}
-	} else {	/* 2870 */
-		aat28xx_write(drvdata->client, drvdata->reg_addrs.bl_m, next);
-	}
-	return 0;
-}
+#endif /* CONFIG_PM */
 
 static int aat28xx_send_intensity(struct aat28xx_driver_data *drvdata, int next)
 {
+	int aat2862_bl_next;
+
 	if (drvdata->mode == NORMAL_MODE) {
 		if (next > drvdata->max_intensity)
 			next = drvdata->max_intensity;
-		if (next < LCD_LED_MIN)
+		/* If value is not 0, should not backlight off by bongkyu.kim */
+		if (next != 0 && next < LCD_LED_MIN)
 			next = LCD_LED_MIN;
 		dprintk("next current is %d\n", next);
 
 		if (drvdata->state == NORMAL_STATE && drvdata->intensity != next)
-			aat28xx_send_intensity_no_check(drvdata, next);
+		{
+			/* LGE_CHANGE
+			  * [To support two BL driver ICs(AAT2870 and AAT2862)]
+			*/
+			if(drvdata->version == 2862)
+			{
+				if(next != 0)
+				{
+					aat2862_bl_next = (~next & 0x1F);	/* Invert BL control bits and Clear upper 3bits */
+					aat2862_bl_next |= 0xE0;		/* MEQS(7)=1, Disable Fade(6)=1, LCD_ON(5)=1*/
+					aat28xx_write(drvdata->client, drvdata->reg_addrs.bl_m, aat2862_bl_next);
+				}
+				else
+				{	// Off the backlight if brightness set level is 0.
+					aat2862_bl_next = 0xDF;		/* MEQS(7)=1, Disable Fade(6)=1, LCD_ON(5)=0*/
+					aat28xx_write(drvdata->client, drvdata->reg_addrs.bl_m, aat2862_bl_next);					
+				}
+			}
+			else	/* 2870 */
+				aat28xx_write(drvdata->client, drvdata->reg_addrs.bl_m, next);
+		}
 		
 		drvdata->intensity = next;
 	}
@@ -661,11 +676,6 @@ static int aat28xx_get_intensity(struct aat28xx_driver_data *drvdata)
 	return drvdata->intensity;
 }
 
-static int aat28xx_change_max_current(struct aat28xx_driver_data *drvdata, int max_current)
-{
-	drvdata->max_intensity = max_current;
-	return aat28xx_send_intensity(drvdata, drvdata->max_intensity);
-}
 
 #ifdef CONFIG_PM
 #ifdef CONFIG_HAS_EARLYSUSPEND
@@ -676,7 +686,6 @@ static void aat28xx_early_suspend(struct early_suspend * h)
 
 	dprintk("start\n");
 	aat28xx_sleep(drvdata);
-	aat28xx_power_internal(drvdata, 0);
 
 	return;
 }
@@ -687,7 +696,6 @@ static void aat28xx_late_resume(struct early_suspend * h)
 						    early_suspend);
 
 	dprintk("start\n");
-	aat28xx_power_internal(drvdata, 1);
 	aat28xx_wakeup(drvdata);
 
 	return;
@@ -697,14 +705,12 @@ static int aat28xx_suspend(struct i2c_client *i2c_dev, pm_message_t state)
 {
 	struct aat28xx_driver_data *drvdata = i2c_get_clientdata(i2c_dev);
 	aat28xx_sleep(drvdata);
-	aat28xx_power_internal(drvdata, 0);
 	return 0;
 }
 
 static int aat28xx_resume(struct i2c_client *i2c_dev)
 {
 	struct aat28xx_driver_data *drvdata = i2c_get_clientdata(i2c_dev);
-	aat28xx_power_internal(drvdata, 1);
 	aat28xx_wakeup(drvdata);
 	return 0;
 }
@@ -714,35 +720,30 @@ static int aat28xx_resume(struct i2c_client *i2c_dev)
 #define aat28xx_resume	NULL
 #endif	/* CONFIG_PM */
 
-/* 
- * 2011-03-08, jinkyu.choi@lge.com
- * if the backlight ic is using vbat power,
- * we should turn off the backlight ic when reboot or power down.
- */
-static void aat28xx_shutdown(struct i2c_client *i2c_dev) {
-	struct aat28xx_driver_data *drvdata = i2c_get_clientdata(i2c_dev);
-
-#if 0
-	printk("%s backlight power state = %d, gpio %d\n",
-			__func__, drvdata->state, drvdata->gpio);
-#endif
-
-	/* change the state to sleep and disable the backlight ic */
-	aat28xx_sleep(drvdata);
-	aat28xx_power_internal(drvdata, 0);
-	//printk("%s is done!\n", __func__);
-}
-
 void aat28xx_switch_mode(struct device *dev, int next_mode)
 {
 	struct aat28xx_driver_data *drvdata = dev_get_drvdata(dev);
+	unsigned int aat28xx_intensity;
 
 	if (!drvdata || drvdata->mode == next_mode)
 		return;
 
-	if (next_mode == NORMAL_MODE) {
+	if (next_mode == ALC_MODE) {
+		/* LGE_CHANGE
+		 * Remove ALC mode
+		 */
+		//aat28xx_set_table(drvdata, drvdata->cmds.alc);
+	}
+	else if (next_mode == NORMAL_MODE) {
 		aat28xx_set_table(drvdata, drvdata->cmds.alc);
-	    aat28xx_send_intensity_no_check(drvdata, drvdata->intensity);
+
+		if(drvdata->version == 2862) {
+			aat28xx_intensity = (~(drvdata->intensity)& 0x1F);	/* Invert BL control bits and Clear upper 3bits */
+			aat28xx_intensity |= 0xE0;				/* MEQS(7)=1, Disable Fade(6)=1, LCD_ON(5)=1*/
+			aat28xx_write(drvdata->client, drvdata->reg_addrs.bl_m, aat28xx_intensity);
+		} else {
+			aat28xx_write(drvdata->client, drvdata->reg_addrs.bl_m, drvdata->intensity);
+		}
 	} else {
 		printk(KERN_ERR "%s: invalid mode(%d)!!!\n", __func__, next_mode);
 		return;
@@ -820,36 +821,10 @@ ssize_t aat28xx_show_drvstat(struct device *dev, struct device_attribute *attr, 
 	return len;
 }
 
-ssize_t aat28xx_store_max_current(struct device *dev, struct device_attribute *attr,
-				   const char *buf, size_t count)
-{
-	struct aat28xx_driver_data *drvdata = dev_get_drvdata(dev->parent);
-	int max_current;
-
-	if (!count)	return -EINVAL;
-
-	sscanf(buf, "%d", &max_current);
-	aat28xx_change_max_current(drvdata, max_current);
-
-	return count;
-}
-
-ssize_t aat28xx_show_max_current(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	struct aat28xx_driver_data *drvdata = dev_get_drvdata(dev->parent);
-	ssize_t len;
-
-	len = sprintf(buf, "%d\n", drvdata->max_intensity);
-
-	return len;
-}
-
 DEVICE_ATTR(alc, 0664, aat28xx_show_alc, aat28xx_store_alc);
 DEVICE_ATTR(reg, 0444, aat28xx_show_reg, NULL);
 DEVICE_ATTR(drvstat, 0444, aat28xx_show_drvstat, NULL);
-DEVICE_ATTR(max_current, 0664, aat28xx_show_max_current, aat28xx_store_max_current);
 
-#ifdef CONFIG_AAT28XX_BACKLIGHT_CLASS
 static int aat28xx_set_brightness(struct backlight_device *bd)
 {
 	struct aat28xx_driver_data *drvdata = dev_get_drvdata(bd->dev.parent);
@@ -866,9 +841,9 @@ static struct backlight_ops aat28xx_ops = {
 	.get_brightness = aat28xx_get_brightness,
 	.update_status  = aat28xx_set_brightness,
 };
-#endif
 
-#ifdef CONFIG_AAT28XX_LEDS_CLASS
+
+#ifdef CONFIG_BACKLIGHT_LEDS_CLASS
 static void leds_brightness_set(struct led_classdev *led_cdev, enum led_brightness value)
 {
 	struct aat28xx_driver_data *drvdata = dev_get_drvdata(led_cdev->dev->parent);
@@ -882,7 +857,11 @@ static void leds_brightness_set(struct led_classdev *led_cdev, enum led_brightne
 
 	brightness = aat28xx_get_intensity(drvdata);
 
-	next = value * drvdata->max_intensity / led_cdev->max_brightness;
+	next = value * drvdata->max_intensity / LED_FULL;
+	/* If value is not 0, should not backlight off by bongkyu.kim */
+	if (value !=0 && next == 0)
+		next = 1;
+		
 	dprintk("input brightness value=%d]\n", next);
 
 	if (brightness != next) {
@@ -894,17 +873,14 @@ static void leds_brightness_set(struct led_classdev *led_cdev, enum led_brightne
 static struct led_classdev aat28xx_led_dev = {
 	.name = LEDS_BACKLIGHT_NAME,
 	.brightness_set = leds_brightness_set,
-	.max_brightness = LED_FULL,
 };
 #endif
 
-static int __init aat28xx_probe(struct i2c_client *i2c_dev, const struct i2c_device_id *i2c_dev_id)
+static int aat28xx_probe(struct i2c_client *i2c_dev, const struct i2c_device_id *i2c_dev_id)
 {
-	struct aat28xx_platform_data *pdata;
+	struct lge_backlight_platform_data *pdata;
 	struct aat28xx_driver_data *drvdata;
-#ifdef CONFIG_AAT28XX_BACKLIGHT_CLASS
 	struct backlight_device *bd;
-#endif
 	int err;
 
 	dprintk("start, client addr=0x%x\n", i2c_dev->addr);
@@ -931,21 +907,18 @@ static int __init aat28xx_probe(struct i2c_client *i2c_dev, const struct i2c_dev
 	drvdata->mode = NORMAL_MODE;
 	drvdata->state = UNINIT_STATE;
 	drvdata->version = pdata->version;
-	drvdata->initialized = pdata->initialized;
 
 	if(aat28xx_setup_version(drvdata) != 0) {
 		eprintk("Error while requesting gpio %d\n", drvdata->gpio);
 		kfree(drvdata);
 		return -ENODEV;
 	}		
-
 	if (drvdata->gpio && gpio_request(drvdata->gpio, "aat28xx_en") != 0) {
 		eprintk("Error while requesting gpio %d\n", drvdata->gpio);
 		kfree(drvdata);
 		return -ENODEV;
 	}
 
-#ifdef CONFIG_AAT28XX_BACKLIGHT_CLASS
 	bd = backlight_device_register("aat28xx-bl", &i2c_dev->dev, NULL, &aat28xx_ops, NULL);
 	if (bd == NULL) {
 		eprintk("entering aat28xx probe function error \n");
@@ -958,20 +931,16 @@ static int __init aat28xx_probe(struct i2c_client *i2c_dev, const struct i2c_dev
 	bd->props.brightness = drvdata->intensity;
 	bd->props.max_brightness = drvdata->max_intensity;
 	drvdata->bd = bd;
-#endif
 
-#ifdef CONFIG_AAT28XX_LEDS_CLASS
+#ifdef CONFIG_BACKLIGHT_LEDS_CLASS
 	if (led_classdev_register(&i2c_dev->dev, &aat28xx_led_dev) == 0) {
 		eprintk("Registering led class dev successfully.\n");
 		drvdata->led = &aat28xx_led_dev;
 		err = device_create_file(drvdata->led->dev, &dev_attr_alc);
 		err = device_create_file(drvdata->led->dev, &dev_attr_reg);
 		err = device_create_file(drvdata->led->dev, &dev_attr_drvstat);
-		err = device_create_file(drvdata->led->dev, &dev_attr_max_current);
 	}
 #endif
-
-	mutex_init(&drvdata->power_lock);
 
 	i2c_set_clientdata(i2c_dev, drvdata);
 	i2c_set_adapdata(i2c_dev->adapter, i2c_dev);
@@ -996,12 +965,8 @@ static int __devexit aat28xx_remove(struct i2c_client *i2c_dev)
 
 	aat28xx_send_intensity(drvdata, 0);
 
-#ifdef CONFIG_AAT28XX_BACKLIGHT_CLASS
 	backlight_device_unregister(drvdata->bd);
-#endif
-#ifdef CONFIG_AAT28XX_LEDS_CLASS
 	led_classdev_unregister(drvdata->led);
-#endif
 	i2c_set_clientdata(i2c_dev, NULL);
 	if (gpio_is_valid(drvdata->gpio))
 		gpio_free(drvdata->gpio);
@@ -1016,14 +981,13 @@ static struct i2c_device_id aat28xx_idtable[] = {
 
 MODULE_DEVICE_TABLE(i2c, aat28xx_idtable);
 
-static struct i2c_driver __refdata aat28xx_driver = {
+static struct i2c_driver aat28xx_driver = {
 	.probe 		= aat28xx_probe,
 	.remove 	= aat28xx_remove,
 #ifndef CONFIG_HAS_EARLYSUSPEND
 	.suspend 	= aat28xx_suspend,
 	.resume 	= aat28xx_resume,
 #endif
-	.shutdown	= aat28xx_shutdown,
 	.id_table 	= aat28xx_idtable,
 	.driver = {
 		.name = MODULE_NAME,
@@ -1046,5 +1010,5 @@ module_init(aat28xx_init);
 module_exit(aat28xx_exit);
 
 MODULE_DESCRIPTION("Backlight driver for ANALOGIC TECH AAT28XX");
-MODULE_AUTHOR("Munyoung Hwang <munyoung.hwang@lge.com>");
+MODULE_AUTHOR("Bongkyu Kim <bongkyu.kim@lge.com>");
 MODULE_LICENSE("GPL");

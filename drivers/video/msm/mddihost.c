@@ -100,6 +100,9 @@ extern void mddi_s6d0142_window_adjust(uint16 x1,
 				       mddi_llist_done_cb_type done_cb);
 #endif
 
+unsigned fb_width = 0;
+unsigned fb_height = 0;
+
 void mddi_init(void)
 {
 	if (mddi_host_initialized)
