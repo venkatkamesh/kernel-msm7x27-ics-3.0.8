@@ -81,6 +81,20 @@ struct gpio_i2c_pin {
 //LGE_DEV_PORTING UNIVA_S
 // [LGE PATCH : START] edward1.kim@lge.com 20110214  
 #if 1
+#if defined(CONFIG_TOUCHSCREEN_MCS6000_TA) || defined(CONFIG_TOUCHSCREEN_MCS6000_ROQU)
+/* touch screen platform data */
+struct touch_platform_data {
+	int ts_x_min;
+	int ts_x_max;
+	int ts_y_min;
+	int ts_y_max;
+	int (*power)(unsigned char onoff);
+	int (*pulldown)(int onoff);
+	int irq;
+	int scl;
+	int sda;
+};
+#else
 struct touch_platform_data {
 	int ts_x_min;
 	int ts_x_max;
@@ -97,6 +111,7 @@ struct touch_platform_data {
 	int ce;
 	int touch_key;
 };
+#endif
 #else
 struct touch_platform_data {
 	int ts_x_min;

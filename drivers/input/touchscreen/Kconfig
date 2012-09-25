@@ -288,6 +288,18 @@ config TOUCHSCREEN_MCS5000
 	  To compile this driver as a module, choose M here: the
 	  module will be called mcs5000_ts.
 
+config TOUCHSCREEN_MCS6000_TA
+        default n
+        tristate "thachtunganh MCS6000 touchscreen driver for LG P500"
+        depends on I2C
+        help
+          Say Y here if you have a LG P500 Optimus One mobile phone.
+
+          If unsure, say N.
+
+          To compile this driver as a module, choose M here: the
+          module will be called mcs6000_ts.
+
 #LGE_CHANGE_S : seven.kim@lge.com kernel3.0 porting
 config TOUCHSCREEN_SYNAPTICS
 	tristate "Synaptics 1743 i2c touchscreen"
