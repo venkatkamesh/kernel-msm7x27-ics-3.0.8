@@ -300,6 +300,13 @@ config TOUCHSCREEN_MCS6000_TA
           To compile this driver as a module, choose M here: the
           module will be called mcs6000_ts.
 
+config TOUCHSCREEN_MCS7000
+	default n
+	tristate "MCS7000 touchscreens"
+	depends on I2C
+	help
+	  Say Y here if you have a MCS7000 touchscreen.
+		  
 #LGE_CHANGE_S : seven.kim@lge.com kernel3.0 porting
 config TOUCHSCREEN_SYNAPTICS
 	tristate "Synaptics 1743 i2c touchscreen"
